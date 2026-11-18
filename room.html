@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCA RM 140</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e2e8f0;
+      --muted: #94a3b8;
+      --floor: #020617;
+      --line: #334155;
+      --live: #5eead4;
+      --bad: #fda4af;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      background: #0b1120;
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px 24px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 18px 22px 8px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      font-weight: 650;
+      letter-spacing: -0.03em;
+      white-space: nowrap;
+    }
+    #status { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+    #status.live { color: var(--live); }
+    #status.bad { color: var(--bad); }
+    #roster {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    #roster li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #0f172a;
+      font-variant-numeric: tabular-nums;
+    }
+    #roster .swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    #roster strong { font-weight: 650; }
+    #roster span { color: var(--muted); font-size: 13px; }
+    main { min-height: 0; padding: 8px 18px 18px; }
+    svg { width: 100%; height: 100%; display: block; }
+    svg text { font-family: ui-sans-serif, system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>CCA RM 140</h1>
+      <p id="status">Connecting</p>
+    </div>
+    <ul id="roster"></ul>
+  </header>
+  <main>
+    <svg id="plan" role="img" aria-label="Floor plan of CCA RM 140"></svg>
+  </main>
+  <script>
+    const ROOM = {
+      w: 7.747,
+      h: 11.111,
+      zones: [
+        { id: "K01", x: 1.827, y: 4.504, place: "left, lower" },
+        { id: "K02", x: 1.827, y: 8.645, place: "left, upper" },
+        { id: "K03", x: 5.329, y: 8.645, place: "right, upper" },
+        { id: "K04", x: 5.329, y: 4.504, place: "right, lower" },
+      ],
+    };
+    ROOM.splitX = (ROOM.zones[0].x + ROOM.zones[2].x) / 2;
+    ROOM.splitY = (ROOM.zones[0].y + ROOM.zones[1].y) / 2;
+    ROOM.byId = Object.fromEntries(ROOM.zones.map((zone) => [zone.id, zone]));
+
+    const PREFIX = "/cca/r140/iphone/";
+    const DEFAULT_WS = "ws://pi02zigbee.lan:9001";
+    const PALETTE = ["#2dd4bf", "#fb923c", "#60a5fa", "#f472b6", "#a3e635", "#c084fc"];
+    const PAD = 0.7;
+
+    const phones = new Map();
+    const ns = "http://www.w3.org/2000/svg";
+    let plan;
+    let statusEl;
+    let rosterEl;
+
+    function sy(y) {
+      return ROOM.h - y;
+    }
+
+    function zoneAt(x, y) {
+      const right = x >= ROOM.splitX;
+      const upper = y >= ROOM.splitY;
+      if (!right && upper) return "K02";
+      if (right && upper) return "K03";
+      if (right) return "K04";
+      return "K01";
+    }
+
+    function normalizeMac(raw) {
+      if (typeof raw !== "string") return null;
+      let hex = "";
+      for (const ch of raw.toUpperCase()) {
+        if ("0123456789ABCDEF".includes(ch)) hex += ch;
+        else if (ch !== ":" && ch !== "-" && ch !== " " && ch !== "\n" && ch !== "\t") return null;
+      }
+      if (hex.length !== 12) return null;
+      return hex.match(/.{2}/g).join(":");
+    }
+
+    function parsePosition(text, topicMac) {
+      const raw = String(text).trim();
+      const mac = normalizeMac(topicMac);
+      if (!mac) return null;
+      if (raw.startsWith("{")) {
+        let obj;
+        try { obj = JSON.parse(raw); } catch { return null; }
+        const region = typeof obj.region === "string" ? obj.region : null;
+        const zone = region ? ROOM.byId[region] : null;
+        const x = Number.isFinite(Number(obj.x)) ? Number(obj.x) : zone && zone.x;
+        const y = Number.isFinite(Number(obj.y)) ? Number(obj.y) : zone && zone.y;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        return { mac: normalizeMac(obj.mac) || mac, x, y, region: zone ? region : zoneAt(x, y) };
+      }
+      if (ROOM.byId[raw]) {
+        const zone = ROOM.byId[raw];
+        return { mac, x: zone.x, y: zone.y, region: raw };
+      }
+      const both = raw.match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(K0[1-4])$/);
+      if (both) return { mac, x: Number(both[1]), y: Number(both[2]), region: both[3] };
+      const xy = raw.match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/);
+      if (xy) {
+        const x = Number(xy[1]);
+        const y = Number(xy[2]);
+        return { mac, x, y, region: zoneAt(x, y) };
+      }
+      return null;
+    }
+
+    function handle(topic, payload) {
+      if (!topic.startsWith(PREFIX)) return;
+      const parts = topic.slice(PREFIX.length).split("/");
+      if (parts.length !== 2) return;
+      const [rawMac, kind] = parts;
+      const mac = normalizeMac(rawMac);
+      if (!mac) return;
+      if (kind === "status") {
+        const phone = phones.get(mac) || { mac, at: Date.now() };
+        phone.offline = payload.trim() === "offline";
+        phone.statusAt = Date.now();
+        phones.set(mac, phone);
+        render();
+        return;
+      }
+      if (kind !== "position") return;
+      const fix = parsePosition(payload, mac);
+      if (!fix) return;
+      const previous = phones.get(fix.mac);
+      phones.set(fix.mac, {
+        mac: fix.mac,
+        x: fix.x,
+        y: fix.y,
+        region: fix.region,
+        at: Date.now(),
+        offline: false,
+        statusAt: previous ? previous.statusAt : Date.now(),
+      });
+      render();
+    }
+
+    function colorFor(mac) {
+      let hash = 0;
+      for (const ch of mac) hash = (hash * 33 + ch.charCodeAt(0)) >>> 0;
+      return PALETTE[hash % PALETTE.length];
+    }
+
+    function ageOf(phone) {
+      if (phone.offline) return "gone";
+      if (!Number.isFinite(phone.x)) return "waiting";
+      const age = (Date.now() - phone.at) / 1000;
+      if (age < 5) return "live";
+      if (age < 15) return "stale";
+      return "gone";
+    }
+
+    function el(name, attrs) {
+      const node = document.createElementNS(ns, name);
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+      return node;
+    }
+
+    function drawPlan() {
+      plan.setAttribute("viewBox", `${-PAD} ${-PAD} ${ROOM.w + PAD * 2} ${ROOM.h + PAD * 2}`);
+      plan.replaceChildren();
+      const cells = [
+        ["K01", 0, 0, ROOM.splitX, ROOM.splitY],
+        ["K02", 0, ROOM.splitY, ROOM.splitX, ROOM.h - ROOM.splitY],
+        ["K04", ROOM.splitX, 0, ROOM.w - ROOM.splitX, ROOM.splitY],
+        ["K03", ROOM.splitX, ROOM.splitY, ROOM.w - ROOM.splitX, ROOM.h - ROOM.splitY],
+      ];
+      for (const [id, x, y, w, h] of cells) {
+        plan.append(el("rect", {
+          "data-zone": id,
+          x, y: sy(y + h), width: w, height: h,
+          fill: "#0f172a", stroke: "#1e293b", "stroke-width": 0.02,
+        }));
+      }
+      plan.append(el("rect", {
+        x: 0, y: 0, width: ROOM.w, height: ROOM.h,
+        fill: "none", stroke: "#334155", "stroke-width": 0.045,
+      }));
+      const corners = {
+        K02: { x: 0.22, y: ROOM.h - 0.2, anchor: "start", baseline: "hanging" },
+        K03: { x: ROOM.w - 0.22, y: ROOM.h - 0.2, anchor: "end", baseline: "hanging" },
+        K01: { x: 0.22, y: 0.22, anchor: "start", baseline: "auto" },
+        K04: { x: ROOM.w - 0.22, y: 0.22, anchor: "end", baseline: "auto" },
+      };
+      for (const zone of ROOM.zones) {
+        plan.append(el("circle", {
+          cx: zone.x, cy: sy(zone.y), r: 0.07,
+          fill: "#e2e8f0",
+        }));
+        const corner = corners[zone.id];
+        const label = el("text", {
+          x: corner.x, y: sy(corner.y),
+          "text-anchor": corner.anchor, "dominant-baseline": corner.baseline,
+          "font-size": 0.32, fill: "#64748b",
+        });
+        label.textContent = zone.id;
+        plan.append(label);
+      }
+      const scale = el("line", {
+        x1: 0.05, y1: ROOM.h + 0.38, x2: 1.05, y2: ROOM.h + 0.38,
+        stroke: "#64748b", "stroke-width": 0.03,
+      });
+      const scaleText = el("text", {
+        x: 1.15, y: ROOM.h + 0.46, "font-size": 0.22, fill: "#64748b",
+      });
+      scaleText.textContent = "1 m";
+      plan.append(scale, scaleText);
+      plan.append(el("g", { id: "phones" }));
+    }
+
+    function layout(visible) {
+      const groups = new Map();
+      for (const phone of visible) {
+        const key = phone.region || `${phone.x.toFixed(2)},${phone.y.toFixed(2)}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(phone);
+      }
+      const placed = [];
+      for (const group of groups.values()) {
+        group.forEach((phone, index) => {
+          let x = phone.x;
+          let y = phone.y;
+          if (group.length > 1) {
+            const angle = -Math.PI / 2 + (index * 2 * Math.PI) / group.length;
+            x += Math.cos(angle) * 0.55;
+            y += Math.sin(angle) * 0.55;
+          }
+          placed.push({
+            ...phone,
+            drawX: Math.min(ROOM.w - 0.25, Math.max(0.25, x)),
+            drawY: Math.min(ROOM.h - 0.25, Math.max(0.25, y)),
+          });
+        });
+      }
+      return placed;
+    }
+
+    function render() {
+      const now = Date.now();
+      for (const [mac, phone] of phones) {
+        const quiet = now - Math.max(phone.at || 0, phone.statusAt || 0);
+        if (quiet > 30000) phones.delete(mac);
+      }
+      const occupied = new Set();
+      const visible = [];
+      for (const phone of phones.values()) {
+        const state = ageOf(phone);
+        if ((state === "live" || state === "stale") && Number.isFinite(phone.x)) {
+          visible.push(phone);
+          occupied.add(phone.region);
+        }
+      }
+      for (const rect of plan.querySelectorAll("[data-zone]")) {
+        rect.setAttribute("fill", occupied.has(rect.getAttribute("data-zone")) ? "#134e4a" : "#0f172a");
+      }
+      const layer = plan.querySelector("#phones");
+      layer.replaceChildren();
+      if (!visible.length) {
+        const note = el("text", {
+          x: ROOM.w / 2, y: ROOM.h / 2, "text-anchor": "middle",
+          "font-size": 0.34, fill: "#475569",
+        });
+        note.textContent = "Waiting for a phone";
+        layer.append(note);
+      }
+      for (const phone of layout(visible)) {
+        const group = el("g", { opacity: ageOf(phone) === "stale" ? 0.45 : 1 });
+        group.append(el("circle", {
+          cx: phone.drawX, cy: sy(phone.drawY), r: 0.24,
+          fill: colorFor(phone.mac), stroke: "#f8fafc", "stroke-width": 0.045,
+        }));
+        const label = el("text", {
+          x: phone.drawX, y: sy(phone.drawY) - 0.36,
+          "text-anchor": "middle", "font-size": 0.26, fill: "#f8fafc",
+          stroke: "#020617", "stroke-width": 0.06, "paint-order": "stroke",
+        });
+        label.textContent = phone.mac.slice(-5);
+        group.append(label);
+        layer.append(group);
+      }
+      rosterEl.replaceChildren();
+      const listed = [...phones.values()].sort((a, b) => a.mac.localeCompare(b.mac));
+      for (const phone of listed) {
+        const state = ageOf(phone);
+        const item = document.createElement("li");
+        const swatch = document.createElement("span");
+        swatch.className = "swatch";
+        swatch.style.background = colorFor(phone.mac);
+        const where = document.createElement("strong");
+        where.textContent = phone.region || "—";
+        const detail = document.createElement("span");
+        const place = Number.isFinite(phone.x) ? `${phone.x.toFixed(2)}, ${phone.y.toFixed(2)}` : "no fix";
+        const word = phone.offline ? "offline" : state === "stale" ? "stale" : state === "gone" ? "lost" : state === "waiting" ? "online" : "here";
+        detail.textContent = `${phone.mac} · ${place} · ${word}`;
+        item.append(swatch, where, detail);
+        rosterEl.append(item);
+      }
+    }
+
+    function setStatus(text, kind) {
+      statusEl.textContent = text;
+      statusEl.className = kind || "";
+    }
+
+    function bytesOf(text) {
+      return new TextEncoder().encode(text);
+    }
+
+    function concatBytes(parts) {
+      const size = parts.reduce((sum, part) => sum + part.length, 0);
+      const out = new Uint8Array(size);
+      let offset = 0;
+      for (const part of parts) {
+        out.set(part, offset);
+        offset += part.length;
+      }
+      return out;
+    }
+
+    function mqttString(text) {
+      const body = bytesOf(text);
+      const head = new Uint8Array(2);
+      head[0] = (body.length >> 8) & 0xff;
+      head[1] = body.length & 0xff;
+      return concatBytes([head, body]);
+    }
+
+    function remainingLength(value) {
+      const out = [];
+      let remaining = value;
+      do {
+        let digit = remaining % 128;
+        remaining = Math.floor(remaining / 128);
+        if (remaining > 0) digit |= 0x80;
+        out.push(digit);
+      } while (remaining > 0);
+      return new Uint8Array(out);
+    }
+
+    function mqttPacket(type, body) {
+      return concatBytes([new Uint8Array([type]), remainingLength(body.length), body]);
+    }
+
+    function connectPacket(clientID) {
+      const head = concatBytes([
+        mqttString("MQTT"),
+        new Uint8Array([0x04, 0x02, 0x00, 30]),
+      ]);
+      return mqttPacket(0x10, concatBytes([head, mqttString(clientID)]));
+    }
+
+    function subscribePacket(packetID, topic) {
+      const id = new Uint8Array([(packetID >> 8) & 0xff, packetID & 0xff]);
+      return mqttPacket(0x82, concatBytes([id, mqttString(topic), new Uint8Array([0])]));
+    }
+
+    function takePackets(input) {
+      const packets = [];
+      let offset = 0;
+      while (offset < input.length) {
+        const length = readRemaining(input, offset + 1);
+        if (!length) return { packets, rest: input.slice(offset) };
+        if (length.error || length.value > 262144) return { packets, rest: new Uint8Array() };
+        const total = 1 + length.consumed + length.value;
+        if (offset + total > input.length) return { packets, rest: input.slice(offset) };
+        const type = input[offset] >> 4;
+        const flags = input[offset] & 0x0f;
+        const body = input.slice(offset + 1 + length.consumed, offset + total);
+        packets.push(interpret(type, flags, body));
+        offset += total;
+      }
+      return { packets, rest: new Uint8Array() };
+    }
+
+    function readRemaining(bytes, start) {
+      let value = 0;
+      let multiplier = 1;
+      let consumed = 0;
+      while (consumed < 4) {
+        if (start + consumed >= bytes.length) return null;
+        const byte = bytes[start + consumed];
+        consumed += 1;
+        value += (byte & 0x7f) * multiplier;
+        if ((byte & 0x80) === 0) return { consumed, value };
+        multiplier *= 128;
+      }
+      return { error: true };
+    }
+
+    function interpret(type, flags, body) {
+      if (type === 2 && body.length >= 2) return { kind: "connack", code: body[1] };
+      if (type === 3) return decodePublish(flags, body);
+      if (type === 9) return { kind: "suback" };
+      if (type === 13) return { kind: "pingresp" };
+      return { kind: "other", type };
+    }
+
+    function decodePublish(flags, body) {
+      if (body.length < 2) return { kind: "other", type: 3 };
+      const length = (body[0] << 8) | body[1];
+      const topicEnd = 2 + length;
+      if (topicEnd > body.length) return { kind: "other", type: 3 };
+      const topic = new TextDecoder().decode(body.slice(2, topicEnd));
+      let payloadStart = topicEnd;
+      if (((flags >> 1) & 0x03) > 0) payloadStart += 2;
+      if (payloadStart > body.length) return { kind: "other", type: 3 };
+      const payload = new TextDecoder().decode(body.slice(payloadStart));
+      return { kind: "publish", topic, payload };
+    }
+
+    function connectWs(url) {
+      setStatus(`Connecting to ${url}`);
+      const ws = new WebSocket(url, ["mqtt"]);
+      ws.binaryType = "arraybuffer";
+      let buffer = new Uint8Array();
+      let ping = 0;
+      ws.onopen = () => {
+        const id = `room-${Math.random().toString(16).slice(2, 8)}`;
+        ws.send(connectPacket(id));
+      };
+      ws.onmessage = (event) => {
+        const chunk = new Uint8Array(event.data);
+        const joined = new Uint8Array(buffer.length + chunk.length);
+        joined.set(buffer);
+        joined.set(chunk, buffer.length);
+        const taken = takePackets(joined);
+        buffer = taken.rest;
+        for (const packet of taken.packets) {
+          if (packet.kind === "connack" && packet.code === 0) {
+            ws.send(subscribePacket(1, `${PREFIX}#`));
+            setStatus("Live · pi02zigbee.lan", "live");
+            ping = window.setInterval(() => {
+              if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array([0xc0, 0x00]));
+            }, 20000);
+          } else if (packet.kind === "connack") {
+            setStatus(`Broker refused the floor plan (${packet.code})`, "bad");
+          } else if (packet.kind === "publish") {
+            handle(packet.topic, packet.payload);
+          }
+        }
+      };
+      ws.onerror = () => setStatus("Broker websocket unreachable", "bad");
+      ws.onclose = () => {
+        window.clearInterval(ping);
+        setStatus("Reconnecting", "bad");
+        window.setTimeout(() => connectWs(url), 3000);
+      };
+    }
+
+    function boot() {
+      plan = document.getElementById("plan");
+      statusEl = document.getElementById("status");
+      rosterEl = document.getElementById("roster");
+      drawPlan();
+      render();
+      window.setInterval(render, 1000);
+      const explicit = new URLSearchParams(location.search).get("ws");
+      if (explicit) {
+        connectWs(explicit);
+        return;
+      }
+      if (location.protocol !== "http:" && location.protocol !== "https:") {
+        connectWs(DEFAULT_WS);
+        return;
+      }
+      const source = new EventSource("/stream");
+      let opened = false;
+      let gaveUp = false;
+      source.addEventListener("status", (event) => {
+        const live = event.data === "Live";
+        setStatus(live ? "Live · pi02zigbee.lan" : event.data, live ? "live" : "bad");
+      });
+      source.addEventListener("position", (event) => {
+        const message = JSON.parse(event.data);
+        handle(message.topic, message.payload);
+      });
+      source.onopen = () => {
+        opened = true;
+      };
+      source.onerror = () => {
+        if (opened) {
+          setStatus("Reconnecting to the floor-plan relay", "bad");
+          return;
+        }
+        if (gaveUp) return;
+        gaveUp = true;
+        source.close();
+        connectWs(DEFAULT_WS);
+      };
+    }
+
+    globalThis.roomPlan = { ROOM, handle, parsePosition, connectPacket, takePackets, zoneAt };
+    if (typeof document !== "undefined") boot();
+  </script>
+</body>
+</html>
